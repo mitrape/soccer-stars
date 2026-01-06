@@ -1,15 +1,16 @@
-# client/main.py
 import os
 import sys
 import pygame
 
-# Allow imports like "from shared.constants import ..."
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from shared.constants import APP_TITLE, WIDTH, HEIGHT, FPS, BLACK, WHITE
-from client.screens import SplashScreen, LoginScreen, LobbyScreen, GameScreen
+from client.screens import SplashScreen, LoginScreen, SignupScreen, LobbyScreen, GameScreen
+from client.network import TcpClient
+
+
 
 class App:
     def __init__(self):
@@ -17,16 +18,30 @@ class App:
         pygame.display.set_caption(APP_TITLE)
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
-
         self.font = pygame.font.SysFont(None, 22)
 
-        # Screen registry
+        # ---- server settings ----
+        self.server_host = "127.0.0.1"
+        self.server_port = 9000
+
+        # choose a UDP port for each client (IMPORTANT: if you run 2 clients on 1 PC, use different ports)
+        self.my_udp_port = 10001
+
+        # ---- session state ----
+        self.me = None
+        self.match_info = None
+
+        # ---- networking ----
+        self.net = TcpClient()
+
         self.screens = {
             "splash": SplashScreen(self),
             "login": LoginScreen(self),
+            "signup": SignupScreen(self),
             "lobby": LobbyScreen(self),
             "game": GameScreen(self),
         }
+
         self.current = None
         self.change_screen("splash")
 
@@ -39,24 +54,14 @@ class App:
         self.current.on_enter(**kwargs)
 
     def handle_global_keys(self, event):
-        # Global shortcuts: 1/2/3/4 from anywhere
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_1:
-                self.change_screen("splash")
-            elif event.key == pygame.K_2:
-                self.change_screen("login")
-            elif event.key == pygame.K_3:
-                self.change_screen("lobby")
-            elif event.key == pygame.K_4:
-                self.change_screen("game")
-            elif event.key == pygame.K_ESCAPE:
+            if event.key == pygame.K_ESCAPE:
                 self.running = False
 
     def draw_footer(self):
-        text = "ESC: Quit | 1 Splash | 2 Login | 3 Lobby | 4 Game"
+        text = "ESC: Quit"
         img = self.font.render(text, True, WHITE)
         rect = img.get_rect(midbottom=(WIDTH//2, HEIGHT - 8))
-        # small shadow
         shadow = self.font.render(text, True, BLACK)
         self.screen.blit(shadow, (rect.x + 1, rect.y + 1))
         self.screen.blit(img, rect)
@@ -74,7 +79,6 @@ class App:
             self.current.update(dt)
             self.current.draw(self.screen)
             self.draw_footer()
-
             pygame.display.flip()
 
         pygame.quit()
