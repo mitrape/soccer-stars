@@ -1,3 +1,4 @@
+# client/main.py
 import os
 import sys
 import pygame
@@ -8,7 +9,9 @@ if ROOT not in sys.path:
 
 from shared.constants import APP_TITLE, WIDTH, HEIGHT, FPS, BLACK, WHITE
 from client.network import TcpClient
+from client.udp_peer import UDPPeer
 from client.screens import SplashScreen, LoginScreen, SignupScreen, LobbyScreen, GameScreen
+
 
 class App:
     def __init__(self):
@@ -23,8 +26,7 @@ class App:
         self.server_port = 9000
 
         # If you run 2 clients on same PC, run one with:
-        #   set UDP_PORT=10002
-        # then python client\main.py
+        #   UDP_PORT=10002 python -m client.main
         self.my_udp_port = int(os.getenv("UDP_PORT", "10001"))
 
         # ---- session state ----
@@ -33,6 +35,9 @@ class App:
 
         # ---- networking ----
         self.net = TcpClient()
+
+        # ---- UDP P2P (Phase 3) ----
+        self.udp_peer = UDPPeer(self.my_udp_port)
 
         self.screens = {
             "splash": SplashScreen(self),
@@ -65,29 +70,35 @@ class App:
         self.screen.blit(img, rect)
 
     def run(self):
-        while self.running:
-            dt = self.clock.tick(FPS) / 1000.0
+        try:
+            while self.running:
+                dt = self.clock.tick(FPS) / 1000.0
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                self.handle_global_keys(event)
-                self.current.handle_event(event)
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.running = False
+                    self.handle_global_keys(event)
+                    self.current.handle_event(event)
 
-            # update screen logic
-            self.current.update(dt)
+                # update screen logic
+                self.current.update(dt)
 
-            # ✅ ONLY HERE we consume network messages
-            for msg in self.net.poll():
-                if hasattr(self.current, "on_network"):
-                    self.current.on_network(msg)
+                # consume TCP messages
+                for msg in self.net.poll():
+                    if hasattr(self.current, "on_network"):
+                        self.current.on_network(msg)
 
-            # draw
-            self.current.draw(self.screen)
-            self.draw_footer()
-            pygame.display.flip()
-
-        pygame.quit()
+                # draw
+                self.current.draw(self.screen)
+                self.draw_footer()
+                pygame.display.flip()
+        finally:
+            # clean shutdown
+            try:
+                self.udp_peer.stop()
+            except Exception:
+                pass
+            pygame.quit()
 
 
 if __name__ == "__main__":

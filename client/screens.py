@@ -326,13 +326,34 @@ class GameScreen(Screen):
         self.title_font = pygame.font.SysFont(None, 54)
         self.small_font = pygame.font.SysFont(None, 24)
         self.match = None
+        self.status = "Starting P2P…"
 
     def on_enter(self, **kwargs):
         self.match = kwargs.get("match")
+        self.status = "Starting P2P…"
+
+        # Start UDP P2P handshake (Phase 3)
+        if self.match:
+            try:
+                self.app.udp_peer.begin_match(
+                    match_id=self.match.get("match_id"),
+                    peer_ip=self.match.get("peer_ip"),
+                    peer_port=self.match.get("peer_udp_port"),
+                    my_username=self.app.me,
+                )
+            except Exception as e:
+                self.status = f"UDP init error: {e}"
+
+    def update(self, dt):
+        # Live status update
+        if self.app.udp_peer.connected:
+            self.status = "P2P connected ✅"
+        else:
+            self.status = self.app.udp_peer.status_text
 
     def draw(self, surface):
         surface.fill((40, 24, 24))
-        title = self.title_font.render("Game Screen (Phase 2 ✅)", True, WHITE)
+        title = self.title_font.render("Game Screen (Phase 3 ✅)", True, WHITE)
         surface.blit(title, title.get_rect(center=(WIDTH//2, 120)))
 
         if self.match:
@@ -341,6 +362,8 @@ class GameScreen(Screen):
                 f"peer: {self.match.get('peer_username')}",
                 f"peer_ip: {self.match.get('peer_ip')}  peer_udp_port: {self.match.get('peer_udp_port')}",
                 f"you_start: {self.match.get('you_start')}",
+                f"udp_local_port: {getattr(self.app, 'my_udp_port', 'unknown')}",
+                f"p2p_status: {self.status}",
             ]
         else:
             lines = ["No match info."]
