@@ -7,10 +7,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from shared.constants import APP_TITLE, WIDTH, HEIGHT, FPS, BLACK, WHITE
-from client.screens import SplashScreen, LoginScreen, SignupScreen, LobbyScreen, GameScreen
 from client.network import TcpClient
-
-
+from client.screens import SplashScreen, LoginScreen, SignupScreen, LobbyScreen, GameScreen
 
 class App:
     def __init__(self):
@@ -24,8 +22,10 @@ class App:
         self.server_host = "127.0.0.1"
         self.server_port = 9000
 
-        # choose a UDP port for each client (IMPORTANT: if you run 2 clients on 1 PC, use different ports)
-        self.my_udp_port = 10001
+        # If you run 2 clients on same PC, run one with:
+        #   set UDP_PORT=10002
+        # then python client\main.py
+        self.my_udp_port = int(os.getenv("UDP_PORT", "10001"))
 
         # ---- session state ----
         self.me = None
@@ -41,7 +41,6 @@ class App:
             "lobby": LobbyScreen(self),
             "game": GameScreen(self),
         }
-
         self.current = None
         self.change_screen("splash")
 
@@ -54,14 +53,13 @@ class App:
         self.current.on_enter(**kwargs)
 
     def handle_global_keys(self, event):
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                self.running = False
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            self.running = False
 
     def draw_footer(self):
-        text = "ESC: Quit"
+        text = f"ESC: Quit | UDP_PORT={self.my_udp_port}"
         img = self.font.render(text, True, WHITE)
-        rect = img.get_rect(midbottom=(WIDTH//2, HEIGHT - 8))
+        rect = img.get_rect(midbottom=(WIDTH // 2, HEIGHT - 8))
         shadow = self.font.render(text, True, BLACK)
         self.screen.blit(shadow, (rect.x + 1, rect.y + 1))
         self.screen.blit(img, rect)
@@ -76,7 +74,15 @@ class App:
                 self.handle_global_keys(event)
                 self.current.handle_event(event)
 
+            # update screen logic
             self.current.update(dt)
+
+            # ✅ ONLY HERE we consume network messages
+            for msg in self.net.poll():
+                if hasattr(self.current, "on_network"):
+                    self.current.on_network(msg)
+
+            # draw
             self.current.draw(self.screen)
             self.draw_footer()
             pygame.display.flip()

@@ -2,6 +2,7 @@ import pygame
 from shared.constants import WIDTH, HEIGHT, WHITE, BLACK, GRAY, DARK, BLUE, GREEN, ORANGE, RED
 from client.ui import Button, TextInput
 
+
 class Screen:
     name = "base"
     def __init__(self, app): self.app = app
@@ -10,6 +11,7 @@ class Screen:
     def handle_event(self, event): pass
     def update(self, dt): pass
     def draw(self, surface): pass
+    def on_network(self, msg): pass
 
 
 # -------------------- Splash --------------------
@@ -23,6 +25,7 @@ class SplashScreen(Screen):
         self.status = "Not connected"
 
     def on_enter(self, **kwargs):
+        # Try connect automatically
         if not self.app.net.connected:
             ok = self.app.net.connect(self.app.server_host, self.app.server_port)
             self.status = "Connected ✅" if ok else "Connect failed ❌"
@@ -63,10 +66,9 @@ class LoginScreen(Screen):
         self.goto_signup_btn = Button((WIDTH//2 - 180, 405, 360, 45), "Create account (Signup)", self.small_font, ORANGE, BLACK)
 
         self.msg = ""
-        self.pending_login = False  # to know OK belongs to login
+        self.waiting_for = None  # "LOGIN" or None
 
     def on_enter(self, **kwargs):
-        # allow message from other screens
         self.msg = kwargs.get("message", "")
 
     def handle_event(self, event):
@@ -80,6 +82,7 @@ class LoginScreen(Screen):
 
             u = self.username.value()
             pw = self.password.value()
+
             if not u:
                 self.msg = "Username is required."
                 return
@@ -87,31 +90,27 @@ class LoginScreen(Screen):
                 self.msg = "Password is required."
                 return
 
-            self.pending_login = True
+            self.waiting_for = "LOGIN"
             self.app.net.send({"type": "LOGIN", "username": u, "password": pw})
 
         if self.goto_signup_btn.is_clicked(event):
             self.app.change_screen("signup")
 
-    def update(self, dt):
-        for m in self.app.net.poll():
-            t = m.get("type")
-            if t == "OK":
-                # Only treat OK as login success if we just attempted login
-                if self.pending_login:
-                    self.pending_login = False
-                    self.app.me = self.username.value()
+    def on_network(self, msg):
+        t = msg.get("type")
 
-                    # tell server our UDP port (needed later for matchmaking)
-                    self.app.net.send({"type": "SET_UDP_PORT", "udp_port": self.app.my_udp_port})
+        if t == "OK" and self.waiting_for == "LOGIN":
+            self.waiting_for = None
+            self.app.me = self.username.value()
 
-                    self.app.change_screen("lobby")
-                else:
-                    self.msg = m.get("message", "OK")
+            # tell server our UDP port
+            self.app.net.send({"type": "SET_UDP_PORT", "udp_port": self.app.my_udp_port})
 
-            elif t == "ERROR":
-                self.pending_login = False
-                self.msg = m.get("message", "Error")
+            self.app.change_screen("lobby")
+
+        elif t == "ERROR":
+            self.waiting_for = None
+            self.msg = msg.get("message", "Error")
 
     def draw(self, surface):
         surface.fill((18, 24, 36))
@@ -123,9 +122,8 @@ class LoginScreen(Screen):
         self.login_btn.draw(surface)
         self.goto_signup_btn.draw(surface)
 
-        if self.msg:
-            msg = self.small_font.render(self.msg, True, GRAY)
-            surface.blit(msg, msg.get_rect(center=(WIDTH//2, 490)))
+        msg = self.small_font.render(self.msg, True, GRAY)
+        surface.blit(msg, (WIDTH//2 - 300, 500))
 
 
 # -------------------- Signup --------------------
@@ -144,7 +142,7 @@ class SignupScreen(Screen):
         self.back_btn = Button((WIDTH//2 - 180, 440, 360, 45), "Back to Login", self.small_font, BLUE, WHITE)
 
         self.msg = ""
-        self.pending_signup = False
+        self.waiting_for = None  # "REGISTER" or None
 
     def handle_event(self, event):
         self.username.handle_event(event)
@@ -163,6 +161,7 @@ class SignupScreen(Screen):
             e = self.email.value()
             pw = self.password.value()
 
+            # ✅ Client-side validation (this was missing/broken for you)
             if not u:
                 self.msg = "Username is required."
                 return
@@ -176,23 +175,21 @@ class SignupScreen(Screen):
                 self.msg = "Password is required."
                 return
 
-            self.pending_signup = True
+            self.waiting_for = "REGISTER"
+            self.msg = "Registering..."
             self.app.net.send({"type": "REGISTER", "username": u, "email": e, "password": pw})
 
-    def update(self, dt):
-        for m in self.app.net.poll():
-            t = m.get("type")
-            if t == "OK":
-                if self.pending_signup:
-                    self.pending_signup = False
-                    # after successful signup, go to login and show message
-                    self.app.change_screen("login", message="Signup success ✅ Now login.")
-                else:
-                    self.msg = m.get("message", "OK")
+    def on_network(self, msg):
+        t = msg.get("type")
 
-            elif t == "ERROR":
-                self.pending_signup = False
-                self.msg = m.get("message", "Error")
+        if t == "OK" and self.waiting_for == "REGISTER":
+            self.waiting_for = None
+            # ✅ go back to login after success
+            self.app.change_screen("login", message="Signup success ✅ Now login.")
+
+        elif t == "ERROR":
+            self.waiting_for = None
+            self.msg = msg.get("message", "Error")
 
     def draw(self, surface):
         surface.fill((16, 30, 28))
@@ -206,9 +203,8 @@ class SignupScreen(Screen):
         self.signup_btn.draw(surface)
         self.back_btn.draw(surface)
 
-        if self.msg:
-            msg = self.small_font.render(self.msg, True, GRAY)
-            surface.blit(msg, msg.get_rect(center=(WIDTH//2, 520)))
+        msg = self.small_font.render(self.msg, True, GRAY)
+        surface.blit(msg, (WIDTH//2 - 300, 520))
 
 
 # -------------------- Lobby --------------------
@@ -220,28 +216,24 @@ class LobbyScreen(Screen):
         self.small_font = pygame.font.SysFont(None, 24)
 
         self.users = []
-        self.last_list_time = 0.0
-        self.msg = "Lobby: click a user to invite."
+        self.timer = 0.0
+        self.msg = "Click a free user to invite."
 
         self.incoming_from = None
         self.accept_btn = Button((WIDTH//2 - 170, HEIGHT//2 + 40, 160, 50), "Accept", self.small_font, GREEN, WHITE)
         self.decline_btn = Button((WIDTH//2 + 10,  HEIGHT//2 + 40, 160, 50), "Decline", self.small_font, RED, WHITE)
 
     def on_enter(self, **kwargs):
-        self.last_list_time = 0.0
-        self.incoming_from = None
-        self.msg = "Lobby: click a user to invite."
+        self.timer = 0.0
         self.app.net.send({"type": "LIST_USERS"})
 
     def handle_event(self, event):
         if self.incoming_from:
             if self.accept_btn.is_clicked(event):
                 self.app.net.send({"type": "INVITE_RESPONSE", "from": self.incoming_from, "accepted": True})
-                self.msg = f"Accepted invite from {self.incoming_from}"
                 self.incoming_from = None
             elif self.decline_btn.is_clicked(event):
                 self.app.net.send({"type": "INVITE_RESPONSE", "from": self.incoming_from, "accepted": False})
-                self.msg = f"Declined invite from {self.incoming_from}"
                 self.incoming_from = None
             return
 
@@ -265,24 +257,24 @@ class LobbyScreen(Screen):
                     return
 
     def update(self, dt):
-        self.last_list_time += dt
-        if self.last_list_time >= 1.0:
-            self.last_list_time = 0.0
+        self.timer += dt
+        if self.timer >= 1.0:
+            self.timer = 0.0
             self.app.net.send({"type": "LIST_USERS"})
 
-        for m in self.app.net.poll():
-            t = m.get("type")
-            if t == "USERS":
-                self.users = m.get("users", [])
-            elif t == "INVITE_RECEIVED":
-                self.incoming_from = m.get("from")
-            elif t == "INVITE_DECLINED":
-                self.msg = f"Invite declined by {m.get('by')}"
-            elif t == "MATCH_START":
-                self.app.match_info = m
-                self.app.change_screen("game", match=m)
-            elif t == "ERROR":
-                self.msg = m.get("message", "Error")
+    def on_network(self, msg):
+        t = msg.get("type")
+        if t == "USERS":
+            self.users = msg.get("users", [])
+        elif t == "INVITE_RECEIVED":
+            self.incoming_from = msg.get("from")
+        elif t == "INVITE_DECLINED":
+            self.msg = f"Invite declined by {msg.get('by')}"
+        elif t == "MATCH_START":
+            self.app.match_info = msg
+            self.app.change_screen("game", match=msg)
+        elif t == "ERROR":
+            self.msg = msg.get("message", "Error")
 
     def draw(self, surface):
         surface.fill((24, 40, 28))
@@ -340,7 +332,7 @@ class GameScreen(Screen):
 
     def draw(self, surface):
         surface.fill((40, 24, 24))
-        title = self.title_font.render("Game Screen (Phase 2 Done ✅)", True, WHITE)
+        title = self.title_font.render("Game Screen (Phase 2 ✅)", True, WHITE)
         surface.blit(title, title.get_rect(center=(WIDTH//2, 120)))
 
         if self.match:

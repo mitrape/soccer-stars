@@ -69,23 +69,26 @@ async def handle_register(msg, writer):
 
     if not u:
         await send(writer, {"type": "ERROR", "message": "Username is required"})
-    return
+        return
 
     if not email:
         await send(writer, {"type": "ERROR", "message": "Email is required"})
-    return
+        return
 
     if not pw:
         await send(writer, {"type": "ERROR", "message": "Password is required"})
-    return
-
+        return
 
     if u in users:
         await send(writer, {"type": "ERROR", "message": "Username already exists"})
         return
 
-    users[u] = {"email": email, "password": hash_password(pw)}
+    users[u] = {
+        "email": email,
+        "password": hash_password(pw)
+    }
     save_users()
+
     await send(writer, {"type": "OK", "message": "Registered successfully"})
 
 
