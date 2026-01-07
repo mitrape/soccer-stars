@@ -86,9 +86,13 @@ class App:
 
         finally:
             self.net.close()
-            self.udp_peer.stop()
+            try:
+                self.udp_peer.stop()
+            except Exception:
+                pass
             pygame.quit()
-
+                # cleanly stop UDP thread/socket so ESC doesn't throw errors
+        
 
 if __name__ == "__main__":
     App().run()

@@ -9,6 +9,7 @@ from shared.netcodec import dumps_line, loads_line
 
 Addr = Tuple[str, int]
 
+
 class UDPPeer:
     def __init__(self, local_port: int):
         self.local_port = int(local_port)
@@ -19,6 +20,7 @@ class UDPPeer:
         self.running = False
         self._listen_thread: Optional[threading.Thread] = None
         self._hello_thread: Optional[threading.Thread] = None
+        self._reliable_thread: Optional[threading.Thread] = None
 
         self.match_id: Optional[str] = None
         self.peer_addr: Optional[Addr] = None
@@ -30,11 +32,8 @@ class UDPPeer:
         self._seq: int = 0
         self.inbox: "queue.Queue[Dict[str, Any]]" = queue.Queue()
 
-        # reliability tracking
         self._pending: Dict[int, Dict[str, Any]] = {}  # seq -> {msg, next_send, tries}
-        self._received_shots: set[int] = set()          # seq numbers of SHOT we already applied
-
-        self._reliable_thread: Optional[threading.Thread] = None
+        self._received_shots: set[int] = set()
 
     def start(self):
         if self.running:
@@ -46,6 +45,7 @@ class UDPPeer:
         self._reliable_thread.start()
 
     def stop(self):
+        # ✅ clean stop for ESC exit
         self.running = False
         try:
             self.sock.close()
@@ -74,12 +74,8 @@ class UDPPeer:
                 break
         return msgs
 
-    # ---------- Reliable send (SHOT) ----------
+    # ---------------- SHOT reliable-ish ----------------
     def send_shot(self, piece_id: int, angle: float, power: float) -> int:
-        """
-        Sends SHOT reliably (resend until SHOT_ACK or retries exhausted).
-        Returns seq.
-        """
         self._seq += 1
         seq = self._seq
         msg = {
@@ -91,9 +87,7 @@ class UDPPeer:
             "power": float(power),
             "t": time.time(),
         }
-        # first send immediately
         self._send(msg)
-        # schedule resends
         self._pending[seq] = {"msg": msg, "next_send": time.time() + 0.08, "tries": 0}
         return seq
 
@@ -104,7 +98,6 @@ class UDPPeer:
             for seq, info in list(self._pending.items()):
                 if now >= info["next_send"]:
                     if info["tries"] >= 6:
-                        # give up
                         to_delete.append(seq)
                         continue
                     self._send(info["msg"])
@@ -114,7 +107,17 @@ class UDPPeer:
                 self._pending.pop(seq, None)
             time.sleep(0.01)
 
-    # ---------- HELLO handshake ----------
+    # ---------------- Phase 7 best-effort ----------------
+    def send_state_hash(self, tick: int, hash_str: str):
+        self._send({"type": "STATE_HASH", "match_id": self.match_id, "tick": int(tick), "hash": str(hash_str)})
+
+    def send_snapshot_req(self, tick: int):
+        self._send({"type": "SNAPSHOT_REQ", "match_id": self.match_id, "tick": int(tick)})
+
+    def send_snapshot(self, tick: int, state: dict):
+        self._send({"type": "STATE_SNAPSHOT", "match_id": self.match_id, "tick": int(tick), "state": state})
+
+    # ---------------- HELLO handshake ----------------
     def _start_hello_loop(self):
         if self._hello_thread and self._hello_thread.is_alive():
             return
@@ -131,33 +134,31 @@ class UDPPeer:
             if time.time() - start > 8.0:
                 self.status_text = "P2P timeout ❌ (no HELLO_ACK)"
                 return
-            self._send({
-                "type": "HELLO",
-                "match_id": self.match_id,
-                "from": self.my_username,
-                "udp_port": self.local_port,
-                "t": time.time(),
-            })
+            self._send({"type": "HELLO", "match_id": self.match_id, "from": self.my_username, "udp_port": self.local_port})
             time.sleep(0.2)
 
-    # ---------- Low-level send/recv ----------
+    # ---------------- low-level ----------------
     def _send(self, msg: Dict[str, Any]):
         if not self.peer_addr:
             return
         try:
             self.sock.sendto(dumps_line(msg), self.peer_addr)
-        except OSError:
+        except Exception:
+            # socket might be closed during exit
             pass
 
     def _listen_loop(self):
         buffer = b""
         while self.running:
             try:
-                data, addr = self.sock.recvfrom(65535)
+                data, _addr = self.sock.recvfrom(65535)
             except BlockingIOError:
                 time.sleep(0.005)
                 continue
             except OSError:
+                # socket closed during exit
+                break
+            except Exception:
                 time.sleep(0.01)
                 continue
 
@@ -167,9 +168,9 @@ class UDPPeer:
                 msg = loads_line(line)
                 if msg is None:
                     continue
-                self._handle(msg, addr)
+                self._handle(msg)
 
-    def _handle(self, msg: Dict[str, Any], addr: Addr):
+    def _handle(self, msg: Dict[str, Any]):
         if msg.get("match_id") != self.match_id:
             return
 
@@ -178,27 +179,24 @@ class UDPPeer:
         if t == "HELLO":
             self.connected = True
             self.status_text = "P2P connected ✅"
-            self._send({"type": "HELLO_ACK", "match_id": self.match_id, "t": time.time()})
+            self._send({"type": "HELLO_ACK", "match_id": self.match_id})
 
         elif t == "HELLO_ACK":
             self.connected = True
             self.status_text = "P2P connected ✅"
 
         elif t == "SHOT":
-            # dedupe by seq
             seq = int(msg.get("seq", 0))
             if seq in self._received_shots:
-                # still ACK duplicates
-                self._send({"type": "SHOT_ACK", "match_id": self.match_id, "seq": seq, "t": time.time()})
+                self._send({"type": "SHOT_ACK", "match_id": self.match_id, "seq": seq})
                 return
             self._received_shots.add(seq)
-
-            # ACK it
-            self._send({"type": "SHOT_ACK", "match_id": self.match_id, "seq": seq, "t": time.time()})
-
-            # deliver to game via inbox
+            self._send({"type": "SHOT_ACK", "match_id": self.match_id, "seq": seq})
             self.inbox.put(msg)
 
         elif t == "SHOT_ACK":
             seq = int(msg.get("seq", 0))
             self._pending.pop(seq, None)
+
+        elif t in ("STATE_HASH", "SNAPSHOT_REQ", "STATE_SNAPSHOT"):
+            self.inbox.put(msg)

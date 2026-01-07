@@ -295,7 +295,7 @@ class LobbyScreen(Screen):
             self.decline_btn.draw(surface)
 
 
-# -------------------- Game (Phases 4+5+6 + Fixed Timestep) --------------------
+# -------------------- Game (Phases 4+5+6+7) --------------------
 class GameScreen(Screen):
     name = "game"
 
@@ -306,16 +306,22 @@ class GameScreen(Screen):
         self.match = None
         self.world = None
 
-        # HUD
         self.p2p_status = "Starting…"
 
         # Turn / motion control
-        self.shot_in_progress = False   # True after we applied a shot until motion ends
+        self.shot_in_progress = False
         self.prev_moving = False
 
-        # ✅ Fixed timestep state (IMPORTANT FOR SYNC)
+        # Fixed timestep
         self.accum = 0.0
-        self.fixed_dt = 1.0 / 120.0     # 120Hz simulation (stable + deterministic-ish)
+        self.fixed_dt = 1.0 / 120.0
+
+        # Phase 7 timers/state
+        self.hash_timer = 0.0
+        self.local_tick = 0
+        self.last_peer_hash = None
+        self.last_local_hash = None
+        self.snapshot_cooldown = 0.0  # prevent spam
 
     def on_enter(self, **kwargs):
         self.match = kwargs.get("match")
@@ -324,10 +330,16 @@ class GameScreen(Screen):
         self.shot_in_progress = False
         self.prev_moving = False
 
-        # reset fixed step accumulator each match
         self.accum = 0.0
 
-        # ---- start UDP handshake ----
+        # Phase 7 state reset
+        self.hash_timer = 0.0
+        self.local_tick = 0
+        self.last_peer_hash = None
+        self.last_local_hash = None
+        self.snapshot_cooldown = 0.0
+
+        # start UDP
         self.app.udp_peer.begin_match(
             match_id=self.match.get("match_id"),
             peer_ip=self.match.get("peer_ip"),
@@ -335,10 +347,7 @@ class GameScreen(Screen):
             my_username=self.app.me,
         )
 
-        # ---- create game world ----
-        # inviter starts => you_start True => you are team 0, but turn starts at team 0 always
         you_team = 0 if self.match.get("you_start") else 1
-
         from client.game_world import GameWorld
         self.world = GameWorld(you_team=you_team, start_turn_team=0)
 
@@ -350,21 +359,40 @@ class GameScreen(Screen):
         t = msg.get("type")
 
         if t == "SHOT":
-            # peer shot arrived => apply it locally
             piece_id = int(msg.get("piece"))
             angle = float(msg.get("angle"))
             power = float(msg.get("power"))
-
             ok = self.world.apply_shot(piece_id, angle, power)
             if ok:
-                self.shot_in_progress = True  # this shot will end when motion stops
+                self.shot_in_progress = True
+
+        elif t == "STATE_HASH":
+            self.last_peer_hash = msg.get("hash")
+
+            if (self.last_local_hash and self.last_peer_hash and
+                self.last_local_hash != self.last_peer_hash):
+
+                # only request snapshot BETWEEN turns
+                if (not self.world.any_moving()) and self.snapshot_cooldown <= 0.0:
+                    self.app.udp_peer.send_snapshot_req(self.local_tick)
+                    self.snapshot_cooldown = 0.7
+
+        elif t == "SNAPSHOT_REQ":
+            # peer asked -> reply with our snapshot
+            snap = self.world.make_snapshot()
+            self.app.udp_peer.send_snapshot(int(msg.get("tick", 0)), snap)
+
+        elif t == "STATE_SNAPSHOT":
+            snap = msg.get("state")
+            if isinstance(snap, dict):
+                # soft correction
+                self.world.apply_snapshot_soft(snap, pos_threshold=6.0)
 
     # ---------- Input ----------
     def handle_event(self, event):
         if not self.world:
             return
 
-        # allow aiming only if it's my turn and nothing is moving
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             self.world.on_mouse_down(event.pos)
 
@@ -372,37 +400,33 @@ class GameScreen(Screen):
             self.world.on_mouse_move(event.pos)
 
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-            # world returns (piece_id, angle, power) or None
             shot = self.world.on_mouse_up(event.pos)
-
-            # IMPORTANT: only shoot if it's currently allowed
             if shot and self.world.can_shoot_now():
                 piece_id, angle, power = shot
-
                 ok = self.world.apply_shot(piece_id, angle, power)
                 if ok:
-                    # send shot reliably to peer
                     self.app.udp_peer.send_shot(piece_id, angle, power)
-
-                    # mark that a shot is now running until motion ends
                     self.shot_in_progress = True
 
     # ---------- Update ----------
     def update(self, dt):
-        # update p2p status
         self.p2p_status = "P2P connected ✅" if self.app.udp_peer.connected else self.app.udp_peer.status_text
 
-        # consume UDP messages (SHOT etc.)
+        # consume UDP messages
         for m in self.app.udp_peer.poll():
             self._handle_udp(m)
 
         if not self.world:
             return
 
-        # ✅ FIXED TIMESTEP PHYSICS (prevents drift/desync)
+        # cooldown timers
+        if self.snapshot_cooldown > 0.0:
+            self.snapshot_cooldown -= dt
+
+        # fixed timestep physics
         self.accum += dt
         if self.accum > 0.25:
-            self.accum = 0.25  # clamp (avoids spiral if window lags)
+            self.accum = 0.25
 
         while self.accum >= self.fixed_dt:
             self.world.update(self.fixed_dt)
@@ -410,13 +434,22 @@ class GameScreen(Screen):
 
         moving = self.world.any_moving()
 
-        # ✅ Turn switching: only after a shot finished moving
-        # (both sides do this because both applied the same shot)
+        # turn switching after shot ends
         if self.shot_in_progress and self.prev_moving and (not moving):
             self.world.turn_team = 1 - self.world.turn_team
             self.shot_in_progress = False
 
         self.prev_moving = moving
+
+        # Phase 7: send state hash every 1 second, ONLY when stopped
+        self.hash_timer += dt
+        if self.hash_timer >= 1.0:
+            self.hash_timer = 0.0
+            self.local_tick += 1
+
+            if not self.world.any_moving():  # ONLY between turns
+                self.last_local_hash = self.world.state_hash()
+                self.app.udp_peer.send_state_hash(self.local_tick, self.last_local_hash)
 
     # ---------- Draw ----------
     def draw(self, surface):
@@ -428,15 +461,15 @@ class GameScreen(Screen):
 
         turn_txt = "YOU" if self.world.turn_team == self.world.you_team else "OPPONENT"
         lines = [
-            "Phases 4+5+6 ✅ (Board + Physics + UDP SHOT sync)",
+            "Phases 4+5+6+7 ✅ (SHOT sync + Desync protection)",
             f"p2p: {self.p2p_status}",
             f"turn: {turn_txt}",
             f"moving: {self.world.any_moving()}",
-            f"you_team: {self.world.you_team} (0=blue,1=red)",
+            f"hash(local): {self.last_local_hash[:8] if self.last_local_hash else '-'}",
+            f"hash(peer):  {self.last_peer_hash[:8] if self.last_peer_hash else '-'}",
         ]
-
         y = 10
         for line in lines:
             img = self.small_font.render(line, True, WHITE)
             surface.blit(img, (10, y))
-            y += 24
+            y += 22
