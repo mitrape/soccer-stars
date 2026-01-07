@@ -21,22 +21,17 @@ class App:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont(None, 22)
 
-        # ---- server settings ----
         self.server_host = "127.0.0.1"
         self.server_port = 9000
 
-        # If you run 2 clients on same PC, run one with:
-        #   UDP_PORT=10002 python -m client.main
+        # Run second client as:
+        #   UDP_PORT=10002 python client/main.py
         self.my_udp_port = int(os.getenv("UDP_PORT", "10001"))
 
-        # ---- session state ----
         self.me = None
         self.match_info = None
 
-        # ---- networking ----
         self.net = TcpClient()
-
-        # ---- UDP P2P (Phase 3) ----
         self.udp_peer = UDPPeer(self.my_udp_port)
 
         self.screens = {
@@ -46,10 +41,10 @@ class App:
             "lobby": LobbyScreen(self),
             "game": GameScreen(self),
         }
-        self.current = None
-        self.change_screen("splash")
 
+        self.current = None
         self.running = True
+        self.change_screen("splash")
 
     def change_screen(self, name, **kwargs):
         if self.current:
@@ -80,24 +75,18 @@ class App:
                     self.handle_global_keys(event)
                     self.current.handle_event(event)
 
-                # update screen logic
                 self.current.update(dt)
 
-                # consume TCP messages
                 for msg in self.net.poll():
-                    if hasattr(self.current, "on_network"):
-                        self.current.on_network(msg)
+                    self.current.on_network(msg)
 
-                # draw
                 self.current.draw(self.screen)
                 self.draw_footer()
                 pygame.display.flip()
+
         finally:
-            # clean shutdown
-            try:
-                self.udp_peer.stop()
-            except Exception:
-                pass
+            self.net.close()
+            self.udp_peer.stop()
             pygame.quit()
 
 

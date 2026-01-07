@@ -8,17 +8,17 @@ from shared.netcodec import dumps_line, loads_line
 
 Addr = Tuple[str, int]
 
+
 class UDPPeer:
     """
-    Phase 3:
-      - Bind UDP socket on local_port
-      - On match start: send HELLO every 0.2s until HELLO_ACK
-      - Ignore packets from other match_id
-      - Expose: connected, status_text
+    Phase 3 UDP handshake:
+      - bind UDP local_port
+      - when match starts: send HELLO every 0.2s until HELLO_ACK (timeout 8s)
+      - accept HELLO too (idempotent) and reply HELLO_ACK
+      - filter by match_id to avoid mixing games
     """
     def __init__(self, local_port: int):
         self.local_port = int(local_port)
-
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", self.local_port))
         self.sock.setblocking(False)
@@ -33,24 +33,23 @@ class UDPPeer:
 
         self.connected: bool = False
         self.status_text: str = "Idle"
-
         self._seq: int = 0
 
-    def start(self) -> None:
+    def start(self):
         if self.running:
             return
         self.running = True
         self._listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._listen_thread.start()
 
-    def stop(self) -> None:
+    def stop(self):
         self.running = False
         try:
             self.sock.close()
         except Exception:
             pass
 
-    def begin_match(self, match_id: str, peer_ip: str, peer_port: int, my_username: str) -> None:
+    def begin_match(self, match_id: str, peer_ip: str, peer_port: int, my_username: str):
         self.match_id = str(match_id)
         self.peer_addr = (str(peer_ip), int(peer_port))
         self.my_username = str(my_username)
@@ -62,19 +61,19 @@ class UDPPeer:
         self.start()
         self._start_hello_loop()
 
-    def _start_hello_loop(self) -> None:
+    def _start_hello_loop(self):
         if self._hello_thread and self._hello_thread.is_alive():
             return
         self._hello_thread = threading.Thread(target=self._hello_loop, daemon=True)
         self._hello_thread.start()
 
-    def _hello_loop(self) -> None:
+    def _hello_loop(self):
         if not self.peer_addr or not self.match_id or not self.my_username:
             self.status_text = "Missing match info"
             return
 
-        timeout_s = 8.0
         start = time.time()
+        timeout_s = 8.0
 
         while self.running and not self.connected:
             if time.time() - start > timeout_s:
@@ -90,10 +89,9 @@ class UDPPeer:
                 "udp_port": self.local_port,
                 "t": time.time(),
             })
-
             time.sleep(0.2)
 
-    def _send(self, msg: Dict[str, Any]) -> None:
+    def _send(self, msg: Dict[str, Any]):
         if not self.peer_addr:
             return
         try:
@@ -101,7 +99,7 @@ class UDPPeer:
         except OSError:
             pass
 
-    def _listen_loop(self) -> None:
+    def _listen_loop(self):
         buffer = b""
         while self.running:
             try:
@@ -119,20 +117,15 @@ class UDPPeer:
                 msg = loads_line(line)
                 if msg is None:
                     continue
-                self._handle_msg(msg, addr)
+                self._handle(msg, addr)
 
-    def _handle_msg(self, msg: Dict[str, Any], addr: Addr) -> None:
+    def _handle(self, msg: Dict[str, Any], addr: Addr):
         if msg.get("match_id") != self.match_id:
             return
 
         t = msg.get("type")
 
-        # If peer_addr not set, set from first incoming packet (rare)
-        if self.peer_addr is None:
-            self.peer_addr = addr
-
         if t == "HELLO":
-            # Mark connected and reply with ACK (idempotent)
             self.connected = True
             self.status_text = "P2P connected ✅"
             self._send({

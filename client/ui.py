@@ -1,4 +1,6 @@
+# client/ui.py
 import pygame
+
 
 class Button:
     def __init__(self, rect, text, font, bg, fg):
@@ -15,7 +17,11 @@ class Button:
         surface.blit(txt, txt.get_rect(center=self.rect.center))
 
     def is_clicked(self, event):
-        return event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.rect.collidepoint(event.pos)
+        return (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self.rect.collidepoint(event.pos)
+        )
 
 
 class TextInput:
@@ -37,7 +43,6 @@ class TextInput:
             elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 pass
             else:
-                # keep it simple (printable chars)
                 if event.unicode and event.unicode.isprintable():
                     self.text += event.unicode
 

@@ -1,3 +1,4 @@
+# client/screens.py
 import pygame
 from shared.constants import WIDTH, HEIGHT, WHITE, BLACK, GRAY, DARK, BLUE, GREEN, ORANGE, RED
 from client.ui import Button, TextInput
@@ -21,11 +22,11 @@ class SplashScreen(Screen):
         super().__init__(app)
         self.title_font = pygame.font.SysFont(None, 64)
         self.small_font = pygame.font.SysFont(None, 26)
-        self.connect_btn = Button((WIDTH//2 - 160, HEIGHT//2 + 70, 320, 55), "Connect + Go to Login", self.small_font, BLUE, WHITE)
+        self.connect_btn = Button((WIDTH//2 - 160, HEIGHT//2 + 70, 320, 55),
+                                  "Connect + Go to Login", self.small_font, BLUE, WHITE)
         self.status = "Not connected"
 
     def on_enter(self, **kwargs):
-        # Try connect automatically
         if not self.app.net.connected:
             ok = self.app.net.connect(self.app.server_host, self.app.server_port)
             self.status = "Connected ✅" if ok else "Connect failed ❌"
@@ -63,10 +64,11 @@ class LoginScreen(Screen):
         self.password = TextInput((WIDTH//2 - 180, 275, 360, 45), self.small_font, "Password", is_password=True)
 
         self.login_btn = Button((WIDTH//2 - 180, 345, 360, 50), "Login", self.small_font, GREEN, WHITE)
-        self.goto_signup_btn = Button((WIDTH//2 - 180, 405, 360, 45), "Create account (Signup)", self.small_font, ORANGE, BLACK)
+        self.goto_signup_btn = Button((WIDTH//2 - 180, 405, 360, 45),
+                                      "Create account (Signup)", self.small_font, ORANGE, BLACK)
 
         self.msg = ""
-        self.waiting_for = None  # "LOGIN" or None
+        self.waiting_for = None
 
     def on_enter(self, **kwargs):
         self.msg = kwargs.get("message", "")
@@ -82,7 +84,6 @@ class LoginScreen(Screen):
 
             u = self.username.value()
             pw = self.password.value()
-
             if not u:
                 self.msg = "Username is required."
                 return
@@ -142,7 +143,7 @@ class SignupScreen(Screen):
         self.back_btn = Button((WIDTH//2 - 180, 440, 360, 45), "Back to Login", self.small_font, BLUE, WHITE)
 
         self.msg = ""
-        self.waiting_for = None  # "REGISTER" or None
+        self.waiting_for = None
 
     def handle_event(self, event):
         self.username.handle_event(event)
@@ -161,7 +162,6 @@ class SignupScreen(Screen):
             e = self.email.value()
             pw = self.password.value()
 
-            # ✅ Client-side validation (this was missing/broken for you)
             if not u:
                 self.msg = "Username is required."
                 return
@@ -184,7 +184,6 @@ class SignupScreen(Screen):
 
         if t == "OK" and self.waiting_for == "REGISTER":
             self.waiting_for = None
-            # ✅ go back to login after success
             self.app.change_screen("login", message="Signup success ✅ Now login.")
 
         elif t == "ERROR":
@@ -318,7 +317,7 @@ class LobbyScreen(Screen):
             self.decline_btn.draw(surface)
 
 
-# -------------------- Game --------------------
+# -------------------- Game (Phase 3) --------------------
 class GameScreen(Screen):
     name = "game"
     def __init__(self, app):
@@ -332,7 +331,6 @@ class GameScreen(Screen):
         self.match = kwargs.get("match")
         self.status = "Starting P2P…"
 
-        # Start UDP P2P handshake (Phase 3)
         if self.match:
             try:
                 self.app.udp_peer.begin_match(
@@ -345,11 +343,7 @@ class GameScreen(Screen):
                 self.status = f"UDP init error: {e}"
 
     def update(self, dt):
-        # Live status update
-        if self.app.udp_peer.connected:
-            self.status = "P2P connected ✅"
-        else:
-            self.status = self.app.udp_peer.status_text
+        self.status = "P2P connected ✅" if self.app.udp_peer.connected else self.app.udp_peer.status_text
 
     def draw(self, surface):
         surface.fill((40, 24, 24))
