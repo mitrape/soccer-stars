@@ -2,21 +2,14 @@
 import socket
 import threading
 import time
-from typing import Optional, Tuple, Dict, Any
+import queue
+from typing import Optional, Tuple, Dict, Any, List
 
 from shared.netcodec import dumps_line, loads_line
 
 Addr = Tuple[str, int]
 
-
 class UDPPeer:
-    """
-    Phase 3 UDP handshake:
-      - bind UDP local_port
-      - when match starts: send HELLO every 0.2s until HELLO_ACK (timeout 8s)
-      - accept HELLO too (idempotent) and reply HELLO_ACK
-      - filter by match_id to avoid mixing games
-    """
     def __init__(self, local_port: int):
         self.local_port = int(local_port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -33,7 +26,15 @@ class UDPPeer:
 
         self.connected: bool = False
         self.status_text: str = "Idle"
+
         self._seq: int = 0
+        self.inbox: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+
+        # reliability tracking
+        self._pending: Dict[int, Dict[str, Any]] = {}  # seq -> {msg, next_send, tries}
+        self._received_shots: set[int] = set()          # seq numbers of SHOT we already applied
+
+        self._reliable_thread: Optional[threading.Thread] = None
 
     def start(self):
         if self.running:
@@ -41,6 +42,8 @@ class UDPPeer:
         self.running = True
         self._listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._listen_thread.start()
+        self._reliable_thread = threading.Thread(target=self._reliable_loop, daemon=True)
+        self._reliable_thread.start()
 
     def stop(self):
         self.running = False
@@ -56,11 +59,62 @@ class UDPPeer:
 
         self.connected = False
         self.status_text = "Connecting… (sending HELLO)"
-        self._seq = 0
+        self._received_shots.clear()
+        self._pending.clear()
 
         self.start()
         self._start_hello_loop()
 
+    def poll(self) -> List[Dict[str, Any]]:
+        msgs: List[Dict[str, Any]] = []
+        while True:
+            try:
+                msgs.append(self.inbox.get_nowait())
+            except queue.Empty:
+                break
+        return msgs
+
+    # ---------- Reliable send (SHOT) ----------
+    def send_shot(self, piece_id: int, angle: float, power: float) -> int:
+        """
+        Sends SHOT reliably (resend until SHOT_ACK or retries exhausted).
+        Returns seq.
+        """
+        self._seq += 1
+        seq = self._seq
+        msg = {
+            "type": "SHOT",
+            "match_id": self.match_id,
+            "seq": seq,
+            "piece": int(piece_id),
+            "angle": float(angle),
+            "power": float(power),
+            "t": time.time(),
+        }
+        # first send immediately
+        self._send(msg)
+        # schedule resends
+        self._pending[seq] = {"msg": msg, "next_send": time.time() + 0.08, "tries": 0}
+        return seq
+
+    def _reliable_loop(self):
+        while self.running:
+            now = time.time()
+            to_delete = []
+            for seq, info in list(self._pending.items()):
+                if now >= info["next_send"]:
+                    if info["tries"] >= 6:
+                        # give up
+                        to_delete.append(seq)
+                        continue
+                    self._send(info["msg"])
+                    info["tries"] += 1
+                    info["next_send"] = now + 0.12
+            for seq in to_delete:
+                self._pending.pop(seq, None)
+            time.sleep(0.01)
+
+    # ---------- HELLO handshake ----------
     def _start_hello_loop(self):
         if self._hello_thread and self._hello_thread.is_alive():
             return
@@ -73,24 +127,20 @@ class UDPPeer:
             return
 
         start = time.time()
-        timeout_s = 8.0
-
         while self.running and not self.connected:
-            if time.time() - start > timeout_s:
+            if time.time() - start > 8.0:
                 self.status_text = "P2P timeout ❌ (no HELLO_ACK)"
                 return
-
-            self._seq += 1
             self._send({
                 "type": "HELLO",
                 "match_id": self.match_id,
                 "from": self.my_username,
-                "seq": self._seq,
                 "udp_port": self.local_port,
                 "t": time.time(),
             })
             time.sleep(0.2)
 
+    # ---------- Low-level send/recv ----------
     def _send(self, msg: Dict[str, Any]):
         if not self.peer_addr:
             return
@@ -128,14 +178,27 @@ class UDPPeer:
         if t == "HELLO":
             self.connected = True
             self.status_text = "P2P connected ✅"
-            self._send({
-                "type": "HELLO_ACK",
-                "match_id": self.match_id,
-                "from": self.my_username,
-                "ack": int(msg.get("seq", 0)),
-                "t": time.time(),
-            })
+            self._send({"type": "HELLO_ACK", "match_id": self.match_id, "t": time.time()})
 
         elif t == "HELLO_ACK":
             self.connected = True
             self.status_text = "P2P connected ✅"
+
+        elif t == "SHOT":
+            # dedupe by seq
+            seq = int(msg.get("seq", 0))
+            if seq in self._received_shots:
+                # still ACK duplicates
+                self._send({"type": "SHOT_ACK", "match_id": self.match_id, "seq": seq, "t": time.time()})
+                return
+            self._received_shots.add(seq)
+
+            # ACK it
+            self._send({"type": "SHOT_ACK", "match_id": self.match_id, "seq": seq, "t": time.time()})
+
+            # deliver to game via inbox
+            self.inbox.put(msg)
+
+        elif t == "SHOT_ACK":
+            seq = int(msg.get("seq", 0))
+            self._pending.pop(seq, None)

@@ -1,21 +1,22 @@
-# server/server.py
-import asyncio
-import json
-import hashlib
-import secrets
+# server/server.py  (only the invite state + handlers changed; you can replace whole file if easier)
+import asyncio, json, hashlib, secrets
 from pathlib import Path
 
 HOST = "0.0.0.0"
 PORT = 9000
 USERS_FILE = Path(__file__).resolve().parent / "users.json"
 
-users = {}          # username -> {email, password_hash}
-online = {}         # username -> writer
-status = {}         # username -> free|busy
-user_ip = {}        # username -> ip
-udp_port = {}       # username -> udp port
-pending_invite = {} # to_user -> from_user
+users = {}
+online = {}
+status = {}
+user_ip = {}
+udp_port = {}
 
+# NEW: invitation sets
+# outgoing[from_user] = set(to_users)
+outgoing = {}
+# incoming[to_user] = from_user  (only allow 1 incoming at a time per target)
+incoming = {}
 
 def load_users():
     global users
@@ -42,21 +43,47 @@ async def send_to(username: str, data: dict):
     if w:
         await send(w, data)
 
+def _set_status(u: str, st: str):
+    if u in online:
+        status[u] = st
+
+def _clear_incoming_for(to_user: str):
+    """Remove incoming invite for to_user and corresponding outgoing mapping."""
+    from_user = incoming.pop(to_user, None)
+    if from_user:
+        s = outgoing.get(from_user)
+        if s:
+            s.discard(to_user)
+            if not s:
+                outgoing.pop(from_user, None)
+
+def _cancel_all_outgoing(from_user: str):
+    """Cancel all invites sent by from_user; notify recipients to close modal."""
+    tos = outgoing.pop(from_user, set())
+    for to_user in list(tos):
+        if incoming.get(to_user) == from_user:
+            incoming.pop(to_user, None)
+            # notify the recipient
+            # (if they later click accept, server will reject anyway)
+            asyncio.create_task(send_to(to_user, {"type": "INVITE_CANCELLED", "from": from_user}))
+
 def safe_close(username: str):
+    # clear invites involving username
+    # 1) cancel all outgoing invites from username
+    _cancel_all_outgoing(username)
+    # 2) if username had an incoming invite, clear it
+    _clear_incoming_for(username)
+
     online.pop(username, None)
     status.pop(username, None)
     user_ip.pop(username, None)
     udp_port.pop(username, None)
-    for to_u, from_u in list(pending_invite.items()):
-        if to_u == username or from_u == username:
-            pending_invite.pop(to_u, None)
 
-
+# ---------- handlers ----------
 async def handle_register(msg, writer):
     u = (msg.get("username") or "").strip()
     email = (msg.get("email") or "").strip()
     pw = msg.get("password") or ""
-
     if not u:
         return await send(writer, {"type": "ERROR", "message": "Username is required"})
     if not email:
@@ -65,7 +92,6 @@ async def handle_register(msg, writer):
         return await send(writer, {"type": "ERROR", "message": "Password is required"})
     if u in users:
         return await send(writer, {"type": "ERROR", "message": "Username already exists"})
-
     users[u] = {"email": email, "password": hash_password(pw)}
     save_users()
     await send(writer, {"type": "OK", "message": "Registered successfully"})
@@ -73,7 +99,6 @@ async def handle_register(msg, writer):
 async def handle_login(msg, writer, addr):
     u = (msg.get("username") or "").strip()
     pw = msg.get("password") or ""
-
     if u not in users:
         await send(writer, {"type": "ERROR", "message": "User not found"})
         return None
@@ -96,10 +121,6 @@ async def handle_login(msg, writer, addr):
     await send(writer, {"type": "OK", "message": "Login successful"})
     return u
 
-async def handle_list_users(writer):
-    data = [{"username": u, "status": status.get(u, "free")} for u in online.keys()]
-    await send(writer, {"type": "USERS", "users": data})
-
 async def handle_set_udp_port(msg, username, writer):
     if not username:
         return await send(writer, {"type": "ERROR", "message": "Login first"})
@@ -112,11 +133,9 @@ async def handle_set_udp_port(msg, username, writer):
     udp_port[username] = p
     await send(writer, {"type": "OK", "message": f"UDP port set to {p}"})
 
-async def handle_set_status(msg, username):
-    if username:
-        s = msg.get("status")
-        if s in ("free", "busy"):
-            status[username] = s
+async def handle_list_users(writer):
+    data = [{"username": u, "status": status.get(u, "free")} for u in online.keys()]
+    await send(writer, {"type": "USERS", "users": data})
 
 async def handle_invite(msg, username, writer):
     if not username:
@@ -127,12 +146,19 @@ async def handle_invite(msg, username, writer):
         return await send(writer, {"type": "ERROR", "message": "User not online"})
     if to_user == username:
         return await send(writer, {"type": "ERROR", "message": "Cannot invite yourself"})
+
     if status.get(username) != "free":
         return await send(writer, {"type": "ERROR", "message": "You are busy"})
     if status.get(to_user) != "free":
         return await send(writer, {"type": "ERROR", "message": "User is busy"})
 
-    pending_invite[to_user] = username
+    # Target can have only 1 incoming invite at a time
+    if to_user in incoming:
+        return await send(writer, {"type": "ERROR", "message": "User already has a pending invite"})
+
+    incoming[to_user] = username
+    outgoing.setdefault(username, set()).add(to_user)
+
     await send_to(to_user, {"type": "INVITE_RECEIVED", "from": username})
     await send(writer, {"type": "OK", "message": f"Invite sent to {to_user}"})
 
@@ -143,22 +169,34 @@ async def handle_invite_response(msg, username, writer):
     from_user = msg.get("from")
     accepted = bool(msg.get("accepted", False))
 
-    if pending_invite.get(username) != from_user:
-        return await send(writer, {"type": "ERROR", "message": "No such pending invite"})
+    # Validate that username currently has an invite from from_user
+    if incoming.get(username) != from_user:
+        return await send(writer, {"type": "ERROR", "message": "Invite expired or not found"})
 
-    pending_invite.pop(username, None)
+    # Remove this invite from tables (whether accepted or declined)
+    _clear_incoming_for(username)
 
     if not accepted:
         await send_to(from_user, {"type": "INVITE_DECLINED", "by": username})
         return await send(writer, {"type": "OK", "message": "Invite declined"})
+
+    # Re-check free state at accept time (race-safe)
+    if status.get(from_user) != "free" or status.get(username) != "free":
+        await send(writer, {"type": "ERROR", "message": "Cannot start match: one player is busy"})
+        await send_to(from_user, {"type": "ERROR", "message": "Match failed: player busy"})
+        return
 
     if from_user not in udp_port or username not in udp_port:
         await send(writer, {"type": "ERROR", "message": "UDP port missing (both players must set it)"})
         await send_to(from_user, {"type": "ERROR", "message": "Match failed: UDP port missing"})
         return
 
-    status[from_user] = "busy"
-    status[username] = "busy"
+    # IMPORTANT FIX:
+    # As soon as match starts, inviter becomes busy and ALL other outgoing invites must be cancelled.
+    _set_status(from_user, "busy")
+    _set_status(username, "busy")
+    _cancel_all_outgoing(from_user)  # cancels remaining invites from inviter
+    _cancel_all_outgoing(username)   # (optional) cancels any from accepter too
 
     match_id = secrets.token_hex(4)
 
@@ -185,18 +223,14 @@ async def handle_logout(username):
     if username:
         safe_close(username)
 
-
 async def client_handler(reader, writer):
     addr = writer.get_extra_info("peername")
-    print("Connected:", addr)
     username = None
-
     try:
         while True:
             line = await reader.readline()
             if not line:
                 break
-
             try:
                 msg = json.loads(line.decode("utf-8"))
             except Exception:
@@ -212,8 +246,6 @@ async def client_handler(reader, writer):
                 await handle_set_udp_port(msg, username, writer)
             elif cmd == "LIST_USERS":
                 await handle_list_users(writer)
-            elif cmd == "SET_STATUS":
-                await handle_set_status(msg, username)
             elif cmd == "INVITE":
                 await handle_invite(msg, username, writer)
             elif cmd == "INVITE_RESPONSE":
@@ -223,13 +255,10 @@ async def client_handler(reader, writer):
                 break
             else:
                 await send(writer, {"type": "ERROR", "message": "Unknown command"})
-
     finally:
         await handle_logout(username)
         writer.close()
         await writer.wait_closed()
-        print("Disconnected:", addr)
-
 
 async def main():
     load_users()
@@ -237,7 +266,6 @@ async def main():
     print(f"Server running on {HOST}:{PORT}")
     async with server:
         await server.serve_forever()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

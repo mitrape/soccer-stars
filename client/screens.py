@@ -2,6 +2,7 @@
 import pygame
 from shared.constants import WIDTH, HEIGHT, WHITE, BLACK, GRAY, DARK, BLUE, GREEN, ORANGE, RED
 from client.ui import Button, TextInput
+from client.game_world import GameWorld
 
 
 class Screen:
@@ -45,10 +46,8 @@ class SplashScreen(Screen):
         surface.fill(DARK)
         title = self.title_font.render("SOCCER STARS", True, WHITE)
         surface.blit(title, title.get_rect(center=(WIDTH//2, HEIGHT//2 - 60)))
-
         st = self.small_font.render(self.status, True, GRAY)
         surface.blit(st, st.get_rect(center=(WIDTH//2, HEIGHT//2)))
-
         self.connect_btn.draw(surface)
 
 
@@ -59,14 +58,11 @@ class LoginScreen(Screen):
         super().__init__(app)
         self.title_font = pygame.font.SysFont(None, 54)
         self.small_font = pygame.font.SysFont(None, 24)
-
         self.username = TextInput((WIDTH//2 - 180, 220, 360, 45), self.small_font, "Username")
         self.password = TextInput((WIDTH//2 - 180, 275, 360, 45), self.small_font, "Password", is_password=True)
-
         self.login_btn = Button((WIDTH//2 - 180, 345, 360, 50), "Login", self.small_font, GREEN, WHITE)
         self.goto_signup_btn = Button((WIDTH//2 - 180, 405, 360, 45),
                                       "Create account (Signup)", self.small_font, ORANGE, BLACK)
-
         self.msg = ""
         self.waiting_for = None
 
@@ -81,7 +77,6 @@ class LoginScreen(Screen):
             if not self.app.net.connected:
                 self.msg = "Not connected to server."
                 return
-
             u = self.username.value()
             pw = self.password.value()
             if not u:
@@ -90,7 +85,6 @@ class LoginScreen(Screen):
             if not pw:
                 self.msg = "Password is required."
                 return
-
             self.waiting_for = "LOGIN"
             self.app.net.send({"type": "LOGIN", "username": u, "password": pw})
 
@@ -99,16 +93,11 @@ class LoginScreen(Screen):
 
     def on_network(self, msg):
         t = msg.get("type")
-
         if t == "OK" and self.waiting_for == "LOGIN":
             self.waiting_for = None
             self.app.me = self.username.value()
-
-            # tell server our UDP port
             self.app.net.send({"type": "SET_UDP_PORT", "udp_port": self.app.my_udp_port})
-
             self.app.change_screen("lobby")
-
         elif t == "ERROR":
             self.waiting_for = None
             self.msg = msg.get("message", "Error")
@@ -117,12 +106,10 @@ class LoginScreen(Screen):
         surface.fill((18, 24, 36))
         title = self.title_font.render("Login", True, WHITE)
         surface.blit(title, title.get_rect(center=(WIDTH//2, 140)))
-
         self.username.draw(surface)
         self.password.draw(surface)
         self.login_btn.draw(surface)
         self.goto_signup_btn.draw(surface)
-
         msg = self.small_font.render(self.msg, True, GRAY)
         surface.blit(msg, (WIDTH//2 - 300, 500))
 
@@ -134,14 +121,11 @@ class SignupScreen(Screen):
         super().__init__(app)
         self.title_font = pygame.font.SysFont(None, 54)
         self.small_font = pygame.font.SysFont(None, 24)
-
         self.username = TextInput((WIDTH//2 - 180, 200, 360, 45), self.small_font, "Username")
         self.email = TextInput((WIDTH//2 - 180, 255, 360, 45), self.small_font, "Email")
         self.password = TextInput((WIDTH//2 - 180, 310, 360, 45), self.small_font, "Password", is_password=True)
-
         self.signup_btn = Button((WIDTH//2 - 180, 380, 360, 50), "Signup (Register)", self.small_font, ORANGE, BLACK)
         self.back_btn = Button((WIDTH//2 - 180, 440, 360, 45), "Back to Login", self.small_font, BLUE, WHITE)
-
         self.msg = ""
         self.waiting_for = None
 
@@ -157,35 +141,27 @@ class SignupScreen(Screen):
             if not self.app.net.connected:
                 self.msg = "Not connected to server."
                 return
-
             u = self.username.value()
             e = self.email.value()
             pw = self.password.value()
-
             if not u:
                 self.msg = "Username is required."
                 return
-            if not e:
-                self.msg = "Email is required for signup."
-                return
-            if "@" not in e or "." not in e:
+            if not e or "@" not in e or "." not in e:
                 self.msg = "Please enter a valid email."
                 return
             if not pw:
                 self.msg = "Password is required."
                 return
-
             self.waiting_for = "REGISTER"
             self.msg = "Registering..."
             self.app.net.send({"type": "REGISTER", "username": u, "email": e, "password": pw})
 
     def on_network(self, msg):
         t = msg.get("type")
-
         if t == "OK" and self.waiting_for == "REGISTER":
             self.waiting_for = None
             self.app.change_screen("login", message="Signup success ✅ Now login.")
-
         elif t == "ERROR":
             self.waiting_for = None
             self.msg = msg.get("message", "Error")
@@ -194,14 +170,11 @@ class SignupScreen(Screen):
         surface.fill((16, 30, 28))
         title = self.title_font.render("Signup", True, WHITE)
         surface.blit(title, title.get_rect(center=(WIDTH//2, 130)))
-
         self.username.draw(surface)
         self.email.draw(surface)
         self.password.draw(surface)
-
         self.signup_btn.draw(surface)
         self.back_btn.draw(surface)
-
         msg = self.small_font.render(self.msg, True, GRAY)
         surface.blit(msg, (WIDTH//2 - 300, 520))
 
@@ -213,11 +186,9 @@ class LobbyScreen(Screen):
         super().__init__(app)
         self.title_font = pygame.font.SysFont(None, 54)
         self.small_font = pygame.font.SysFont(None, 24)
-
         self.users = []
         self.timer = 0.0
         self.msg = "Click a free user to invite."
-
         self.incoming_from = None
         self.accept_btn = Button((WIDTH//2 - 170, HEIGHT//2 + 40, 160, 50), "Accept", self.small_font, GREEN, WHITE)
         self.decline_btn = Button((WIDTH//2 + 10,  HEIGHT//2 + 40, 160, 50), "Decline", self.small_font, RED, WHITE)
@@ -270,16 +241,23 @@ class LobbyScreen(Screen):
         elif t == "INVITE_DECLINED":
             self.msg = f"Invite declined by {msg.get('by')}"
         elif t == "MATCH_START":
+            # FIX: if already in a match, ignore extra match_start
+            if self.app.match_info is not None:
+                self.msg = "Already in a match (ignoring extra MATCH_START)."
+                return
             self.app.match_info = msg
             self.app.change_screen("game", match=msg)
         elif t == "ERROR":
             self.msg = msg.get("message", "Error")
+        elif t == "INVITE_CANCELLED":
+            if self.incoming_from == msg.get("from"):
+                self.incoming_from = None
+                self.msg = f"Invite from {msg.get('from')} cancelled (player became busy)."
 
     def draw(self, surface):
         surface.fill((24, 40, 28))
         title = self.title_font.render("Lobby", True, WHITE)
         surface.blit(title, title.get_rect(center=(WIDTH//2, 120)))
-
         msg = self.small_font.render(self.msg, True, GRAY)
         surface.blit(msg, (WIDTH//2 - 300, 160))
 
@@ -317,51 +295,148 @@ class LobbyScreen(Screen):
             self.decline_btn.draw(surface)
 
 
-# -------------------- Game (Phase 3) --------------------
+# -------------------- Game (Phases 4+5+6 + Fixed Timestep) --------------------
 class GameScreen(Screen):
     name = "game"
+
     def __init__(self, app):
         super().__init__(app)
-        self.title_font = pygame.font.SysFont(None, 54)
         self.small_font = pygame.font.SysFont(None, 24)
+
         self.match = None
-        self.status = "Starting P2P…"
+        self.world = None
+
+        # HUD
+        self.p2p_status = "Starting…"
+
+        # Turn / motion control
+        self.shot_in_progress = False   # True after we applied a shot until motion ends
+        self.prev_moving = False
+
+        # ✅ Fixed timestep state (IMPORTANT FOR SYNC)
+        self.accum = 0.0
+        self.fixed_dt = 1.0 / 120.0     # 120Hz simulation (stable + deterministic-ish)
 
     def on_enter(self, **kwargs):
         self.match = kwargs.get("match")
-        self.status = "Starting P2P…"
+        self.p2p_status = "Starting…"
 
-        if self.match:
-            try:
-                self.app.udp_peer.begin_match(
-                    match_id=self.match.get("match_id"),
-                    peer_ip=self.match.get("peer_ip"),
-                    peer_port=self.match.get("peer_udp_port"),
-                    my_username=self.app.me,
-                )
-            except Exception as e:
-                self.status = f"UDP init error: {e}"
+        self.shot_in_progress = False
+        self.prev_moving = False
 
+        # reset fixed step accumulator each match
+        self.accum = 0.0
+
+        # ---- start UDP handshake ----
+        self.app.udp_peer.begin_match(
+            match_id=self.match.get("match_id"),
+            peer_ip=self.match.get("peer_ip"),
+            peer_port=self.match.get("peer_udp_port"),
+            my_username=self.app.me,
+        )
+
+        # ---- create game world ----
+        # inviter starts => you_start True => you are team 0, but turn starts at team 0 always
+        you_team = 0 if self.match.get("you_start") else 1
+
+        from client.game_world import GameWorld
+        self.world = GameWorld(you_team=you_team, start_turn_team=0)
+
+    # ---------- UDP handling ----------
+    def _handle_udp(self, msg: dict):
+        if not self.world:
+            return
+
+        t = msg.get("type")
+
+        if t == "SHOT":
+            # peer shot arrived => apply it locally
+            piece_id = int(msg.get("piece"))
+            angle = float(msg.get("angle"))
+            power = float(msg.get("power"))
+
+            ok = self.world.apply_shot(piece_id, angle, power)
+            if ok:
+                self.shot_in_progress = True  # this shot will end when motion stops
+
+    # ---------- Input ----------
+    def handle_event(self, event):
+        if not self.world:
+            return
+
+        # allow aiming only if it's my turn and nothing is moving
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.world.on_mouse_down(event.pos)
+
+        elif event.type == pygame.MOUSEMOTION:
+            self.world.on_mouse_move(event.pos)
+
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            # world returns (piece_id, angle, power) or None
+            shot = self.world.on_mouse_up(event.pos)
+
+            # IMPORTANT: only shoot if it's currently allowed
+            if shot and self.world.can_shoot_now():
+                piece_id, angle, power = shot
+
+                ok = self.world.apply_shot(piece_id, angle, power)
+                if ok:
+                    # send shot reliably to peer
+                    self.app.udp_peer.send_shot(piece_id, angle, power)
+
+                    # mark that a shot is now running until motion ends
+                    self.shot_in_progress = True
+
+    # ---------- Update ----------
     def update(self, dt):
-        self.status = "P2P connected ✅" if self.app.udp_peer.connected else self.app.udp_peer.status_text
+        # update p2p status
+        self.p2p_status = "P2P connected ✅" if self.app.udp_peer.connected else self.app.udp_peer.status_text
 
+        # consume UDP messages (SHOT etc.)
+        for m in self.app.udp_peer.poll():
+            self._handle_udp(m)
+
+        if not self.world:
+            return
+
+        # ✅ FIXED TIMESTEP PHYSICS (prevents drift/desync)
+        self.accum += dt
+        if self.accum > 0.25:
+            self.accum = 0.25  # clamp (avoids spiral if window lags)
+
+        while self.accum >= self.fixed_dt:
+            self.world.update(self.fixed_dt)
+            self.accum -= self.fixed_dt
+
+        moving = self.world.any_moving()
+
+        # ✅ Turn switching: only after a shot finished moving
+        # (both sides do this because both applied the same shot)
+        if self.shot_in_progress and self.prev_moving and (not moving):
+            self.world.turn_team = 1 - self.world.turn_team
+            self.shot_in_progress = False
+
+        self.prev_moving = moving
+
+    # ---------- Draw ----------
     def draw(self, surface):
-        surface.fill((40, 24, 24))
-        title = self.title_font.render("Game Screen (Phase 3 ✅)", True, WHITE)
-        surface.blit(title, title.get_rect(center=(WIDTH//2, 120)))
+        if not self.world:
+            surface.fill((20, 20, 20))
+            return
 
-        if self.match:
-            lines = [
-                f"match_id: {self.match.get('match_id')}",
-                f"peer: {self.match.get('peer_username')}",
-                f"peer_ip: {self.match.get('peer_ip')}  peer_udp_port: {self.match.get('peer_udp_port')}",
-                f"you_start: {self.match.get('you_start')}",
-                f"udp_local_port: {getattr(self.app, 'my_udp_port', 'unknown')}",
-                f"p2p_status: {self.status}",
-            ]
-        else:
-            lines = ["No match info."]
+        self.world.draw(surface)
 
-        for i, line in enumerate(lines):
-            txt = self.small_font.render(line, True, GRAY)
-            surface.blit(txt, (WIDTH//2 - 300, 200 + i * 30))
+        turn_txt = "YOU" if self.world.turn_team == self.world.you_team else "OPPONENT"
+        lines = [
+            "Phases 4+5+6 ✅ (Board + Physics + UDP SHOT sync)",
+            f"p2p: {self.p2p_status}",
+            f"turn: {turn_txt}",
+            f"moving: {self.world.any_moving()}",
+            f"you_team: {self.world.you_team} (0=blue,1=red)",
+        ]
+
+        y = 10
+        for line in lines:
+            img = self.small_font.render(line, True, WHITE)
+            surface.blit(img, (10, y))
+            y += 24
