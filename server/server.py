@@ -73,6 +73,7 @@ def safe_close(username: str):
     _cancel_all_outgoing(username)
     # 2) if username had an incoming invite, clear it
     _clear_incoming_for(username)
+    status[username] = "free"
 
     online.pop(username, None)
     status.pop(username, None)
@@ -223,6 +224,24 @@ async def handle_logout(username):
     if username:
         safe_close(username)
 
+async def handle_match_end(msg, username):
+    """
+    Called when a client finishes a match.
+    Frees this user and clears any pending invites involving them.
+    """
+    if not username:
+        return
+
+    global pending_invite, status
+
+    # mark user as free
+    status[username] = "free"
+
+    # remove any pending invites involving this user
+    for to_u, from_u in list(pending_invite.items()):
+        if to_u == username or from_u == username:
+            pending_invite.pop(to_u, None)
+
 async def client_handler(reader, writer):
     addr = writer.get_extra_info("peername")
     username = None
@@ -253,6 +272,8 @@ async def client_handler(reader, writer):
             elif cmd == "LOGOUT":
                 await handle_logout(username)
                 break
+            elif cmd == "MATCH_END":
+                await handle_match_end(msg, username)
             else:
                 await send(writer, {"type": "ERROR", "message": "Unknown command"})
     finally:

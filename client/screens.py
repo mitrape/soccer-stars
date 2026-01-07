@@ -182,20 +182,39 @@ class SignupScreen(Screen):
 # -------------------- Lobby --------------------
 class LobbyScreen(Screen):
     name = "lobby"
+
     def __init__(self, app):
         super().__init__(app)
         self.title_font = pygame.font.SysFont(None, 54)
         self.small_font = pygame.font.SysFont(None, 24)
+
         self.users = []
         self.timer = 0.0
         self.msg = "Click a free user to invite."
+
         self.incoming_from = None
         self.accept_btn = Button((WIDTH//2 - 170, HEIGHT//2 + 40, 160, 50), "Accept", self.small_font, GREEN, WHITE)
         self.decline_btn = Button((WIDTH//2 + 10,  HEIGHT//2 + 40, 160, 50), "Decline", self.small_font, RED, WHITE)
 
     def on_enter(self, **kwargs):
         self.timer = 0.0
+        self.incoming_from = None
+
+        # ✅ Auto-reconnect TCP if it dropped
+        if not self.app.net.connected:
+            ok = self.app.net.connect(self.app.server_host, self.app.server_port)
+            if not ok:
+                self.msg = "Not connected to server."
+                return
+
+            # after reconnect, re-identify session (simple approach):
+            # your server doesn't support token sessions, so we just show message.
+            # user can re-login if needed.
+            self.msg = "Reconnected. If you were logged out, login again."
+
+        # refresh list
         self.app.net.send({"type": "LIST_USERS"})
+        self.msg = "Click a free user to invite."
 
     def handle_event(self, event):
         if self.incoming_from:
@@ -208,6 +227,10 @@ class LobbyScreen(Screen):
             return
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if not self.app.net.connected:
+                self.msg = "Not connected to server."
+                return
+
             mx, my = event.pos
             start_y = 200
             row_h = 36
@@ -230,7 +253,8 @@ class LobbyScreen(Screen):
         self.timer += dt
         if self.timer >= 1.0:
             self.timer = 0.0
-            self.app.net.send({"type": "LIST_USERS"})
+            if self.app.net.connected:
+                self.app.net.send({"type": "LIST_USERS"})
 
     def on_network(self, msg):
         t = msg.get("type")
@@ -241,23 +265,16 @@ class LobbyScreen(Screen):
         elif t == "INVITE_DECLINED":
             self.msg = f"Invite declined by {msg.get('by')}"
         elif t == "MATCH_START":
-            # FIX: if already in a match, ignore extra match_start
-            if self.app.match_info is not None:
-                self.msg = "Already in a match (ignoring extra MATCH_START)."
-                return
             self.app.match_info = msg
             self.app.change_screen("game", match=msg)
         elif t == "ERROR":
             self.msg = msg.get("message", "Error")
-        elif t == "INVITE_CANCELLED":
-            if self.incoming_from == msg.get("from"):
-                self.incoming_from = None
-                self.msg = f"Invite from {msg.get('from')} cancelled (player became busy)."
 
     def draw(self, surface):
         surface.fill((24, 40, 28))
         title = self.title_font.render("Lobby", True, WHITE)
         surface.blit(title, title.get_rect(center=(WIDTH//2, 120)))
+
         msg = self.small_font.render(self.msg, True, GRAY)
         surface.blit(msg, (WIDTH//2 - 300, 160))
 
@@ -294,52 +311,73 @@ class LobbyScreen(Screen):
             self.accept_btn.draw(surface)
             self.decline_btn.draw(surface)
 
-
-# -------------------- Game (Phases 4+5+6+7) --------------------
+# -------------------- Game (Phases 4..8) --------------------
 class GameScreen(Screen):
     name = "game"
+    WIN_SCORE = 2
 
     def __init__(self, app):
         super().__init__(app)
         self.small_font = pygame.font.SysFont(None, 24)
+        self.big_font = pygame.font.SysFont(None, 64)
 
         self.match = None
         self.world = None
 
         self.p2p_status = "Starting…"
 
-        # Turn / motion control
+        # turn + motion
         self.shot_in_progress = False
         self.prev_moving = False
 
-        # Fixed timestep
+        # fixed timestep
         self.accum = 0.0
         self.fixed_dt = 1.0 / 120.0
 
-        # Phase 7 timers/state
-        self.hash_timer = 0.0
-        self.local_tick = 0
-        self.last_peer_hash = None
-        self.last_local_hash = None
-        self.snapshot_cooldown = 0.0  # prevent spam
-
-    def on_enter(self, **kwargs):
-        self.match = kwargs.get("match")
-        self.p2p_status = "Starting…"
-
-        self.shot_in_progress = False
-        self.prev_moving = False
-
-        self.accum = 0.0
-
-        # Phase 7 state reset
+        # Phase 7
         self.hash_timer = 0.0
         self.local_tick = 0
         self.last_peer_hash = None
         self.last_local_hash = None
         self.snapshot_cooldown = 0.0
 
-        # start UDP
+        # Phase 8
+        self.score_blue = 0
+        self.score_red = 0
+        self.banner = ""
+        self.banner_timer = 0.0
+        self.game_over = False
+        self.winner_team = None  # 0/1
+
+        # auto-return to lobby after game over
+        self.return_timer = 0.0
+        self._returned = False
+
+    def on_enter(self, **kwargs):
+        self.match = kwargs.get("match")
+
+        self.p2p_status = "Starting…"
+        self.shot_in_progress = False
+        self.prev_moving = False
+        self.accum = 0.0
+
+        self.hash_timer = 0.0
+        self.local_tick = 0
+        self.last_peer_hash = None
+        self.last_local_hash = None
+        self.snapshot_cooldown = 0.0
+
+        self.score_blue = 0
+        self.score_red = 0
+        self.banner = ""
+        self.banner_timer = 0.0
+        self.game_over = False
+        self.winner_team = None
+
+        self.return_timer = 0.0
+        self._returned = False
+
+        # start UDP match
         self.app.udp_peer.begin_match(
             match_id=self.match.get("match_id"),
             peer_ip=self.match.get("peer_ip"),
@@ -350,6 +388,25 @@ class GameScreen(Screen):
         you_team = 0 if self.match.get("you_start") else 1
         from client.game_world import GameWorld
         self.world = GameWorld(you_team=you_team, start_turn_team=0)
+
+
+
+    # ---------- helpers ----------
+    def _set_free_and_back_to_lobby(self):
+        """
+        Each client will call this locally.
+        That makes BOTH players free because both clients run it.
+        """
+        if self._returned:
+            return
+        self._returned = True
+
+        # tell server we are free again
+        if self.app.net.connected:
+            self.app.net.send({"type": "MATCH_END"})
+
+        # go back to lobby and refresh list
+        self.app.change_screen("lobby")
 
     # ---------- UDP handling ----------
     def _handle_udp(self, msg: dict):
@@ -366,31 +423,57 @@ class GameScreen(Screen):
             if ok:
                 self.shot_in_progress = True
 
+        # Phase 7
         elif t == "STATE_HASH":
             self.last_peer_hash = msg.get("hash")
 
-            if (self.last_local_hash and self.last_peer_hash and
-                self.last_local_hash != self.last_peer_hash):
-
-                # only request snapshot BETWEEN turns
-                if (not self.world.any_moving()) and self.snapshot_cooldown <= 0.0:
+            if (not self.world.any_moving()) and self.last_local_hash and self.last_peer_hash:
+                if self.last_local_hash != self.last_peer_hash and self.snapshot_cooldown <= 0.0:
                     self.app.udp_peer.send_snapshot_req(self.local_tick)
                     self.snapshot_cooldown = 0.7
 
         elif t == "SNAPSHOT_REQ":
-            # peer asked -> reply with our snapshot
-            snap = self.world.make_snapshot()
-            self.app.udp_peer.send_snapshot(int(msg.get("tick", 0)), snap)
+            if not self.world.any_moving():
+                snap = self.world.make_snapshot()
+                self.app.udp_peer.send_snapshot(int(msg.get("tick", 0)), snap)
 
         elif t == "STATE_SNAPSHOT":
             snap = msg.get("state")
             if isinstance(snap, dict):
-                # soft correction
                 self.world.apply_snapshot_soft(snap, pos_threshold=6.0)
+
+        # Phase 8
+        elif t == "GOAL":
+            scorer = int(msg.get("scorer"))
+            self.score_blue = int(msg.get("score_blue", self.score_blue))
+            self.score_red = int(msg.get("score_red", self.score_red))
+            self.banner = "GOAL! " + ("BLUE" if scorer == 0 else "RED")
+            self.banner_timer = 1.4
+
+        elif t == "RESET":
+            payload = msg.get("payload")
+            if isinstance(payload, dict):
+                self.world.import_positions(payload)
+                self.shot_in_progress = False
+                self.prev_moving = False
+
+        elif t == "END":
+            # show end overlay, then auto return to lobby
+            self.game_over = True
+            self.winner_team = int(msg.get("winner"))
+            self.score_blue = int(msg.get("score_blue", self.score_blue))
+            self.score_red = int(msg.get("score_red", self.score_red))
+            self.return_timer = 2.0  # show winner 2 seconds then go lobby
 
     # ---------- Input ----------
     def handle_event(self, event):
         if not self.world:
+            return
+
+        # allow ESC immediate exit still (your global handler will stop app)
+
+        if self.game_over:
+            # ignore mouse controls after game over
             return
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -412,16 +495,20 @@ class GameScreen(Screen):
     def update(self, dt):
         self.p2p_status = "P2P connected ✅" if self.app.udp_peer.connected else self.app.udp_peer.status_text
 
-        # consume UDP messages
+        # pump UDP inbox
         for m in self.app.udp_peer.poll():
             self._handle_udp(m)
 
         if not self.world:
             return
 
-        # cooldown timers
         if self.snapshot_cooldown > 0.0:
             self.snapshot_cooldown -= dt
+
+        if self.banner_timer > 0.0:
+            self.banner_timer -= dt
+            if self.banner_timer <= 0:
+                self.banner = ""
 
         # fixed timestep physics
         self.accum += dt
@@ -429,27 +516,68 @@ class GameScreen(Screen):
             self.accum = 0.25
 
         while self.accum >= self.fixed_dt:
-            self.world.update(self.fixed_dt)
+            if not self.game_over:
+                self.world.update(self.fixed_dt)
             self.accum -= self.fixed_dt
 
         moving = self.world.any_moving()
 
-        # turn switching after shot ends
-        if self.shot_in_progress and self.prev_moving and (not moving):
+        # turn switching after a shot ends
+        if (not self.game_over) and self.shot_in_progress and self.prev_moving and (not moving):
             self.world.turn_team = 1 - self.world.turn_team
             self.shot_in_progress = False
 
         self.prev_moving = moving
 
-        # Phase 7: send state hash every 1 second, ONLY when stopped
+        # Phase 8: local goal detection (only while playing)
+        if not self.game_over:
+            scorer = self.world.check_goal()
+            if scorer is not None:
+                if scorer == 0:
+                    self.score_blue += 1
+                else:
+                    self.score_red += 1
+
+                self.banner = "GOAL! " + ("BLUE" if scorer == 0 else "RED")
+                self.banner_timer = 1.4
+                self.app.udp_peer.send_goal(scorer, self.score_blue, self.score_red)
+
+                # win condition
+                if self.score_blue >= self.WIN_SCORE or self.score_red >= self.WIN_SCORE:
+                    winner = 0 if self.score_blue > self.score_red else 1
+                    self.game_over = True
+                    self.winner_team = winner
+                    self.return_timer = 2.0
+                    self.app.udp_peer.send_end(winner, self.score_blue, self.score_red)
+                    return
+
+                # reset for next kickoff; scoring team starts
+                next_turn = scorer
+                from client.game_world import GameWorld
+                you_team = self.world.you_team
+                self.world = GameWorld(you_team=you_team, start_turn_team=next_turn)
+
+                payload = self.world.export_positions()
+                self.app.udp_peer.send_reset(payload)
+
+                self.shot_in_progress = False
+                self.prev_moving = False
+
+        # Phase 7: send hash every 1s only between turns
         self.hash_timer += dt
         if self.hash_timer >= 1.0:
             self.hash_timer = 0.0
             self.local_tick += 1
 
-            if not self.world.any_moving():  # ONLY between turns
+            if (not self.game_over) and (not self.world.any_moving()):
                 self.last_local_hash = self.world.state_hash()
                 self.app.udp_peer.send_state_hash(self.local_tick, self.last_local_hash)
+
+        # auto return after end
+        if self.game_over and self.return_timer > 0.0:
+            self.return_timer -= dt
+            if self.return_timer <= 0.0:
+                self._set_free_and_back_to_lobby()
 
     # ---------- Draw ----------
     def draw(self, surface):
@@ -460,16 +588,28 @@ class GameScreen(Screen):
         self.world.draw(surface)
 
         turn_txt = "YOU" if self.world.turn_team == self.world.you_team else "OPPONENT"
-        lines = [
-            "Phases 4+5+6+7 ✅ (SHOT sync + Desync protection)",
+        hud = [
             f"p2p: {self.p2p_status}",
+            f"score: BLUE {self.score_blue}  -  RED {self.score_red}",
             f"turn: {turn_txt}",
-            f"moving: {self.world.any_moving()}",
-            f"hash(local): {self.last_local_hash[:8] if self.last_local_hash else '-'}",
-            f"hash(peer):  {self.last_peer_hash[:8] if self.last_peer_hash else '-'}",
         ]
         y = 10
-        for line in lines:
-            img = self.small_font.render(line, True, WHITE)
-            surface.blit(img, (10, y))
+        for line in hud:
+            surface.blit(self.small_font.render(line, True, WHITE), (10, y))
             y += 22
+
+        if self.banner:
+            img = self.big_font.render(self.banner, True, WHITE)
+            surface.blit(img, img.get_rect(center=(WIDTH // 2, 70)))
+
+        if self.game_over:
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 170))
+            surface.blit(overlay, (0, 0))
+
+            winner_txt = "BLUE WINS!" if self.winner_team == 0 else "RED WINS!"
+            img = self.big_font.render(winner_txt, True, WHITE)
+            surface.blit(img, img.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 20)))
+
+            small = self.small_font.render("Returning to Lobby…", True, WHITE)
+            surface.blit(small, small.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 40)))
