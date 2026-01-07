@@ -32,6 +32,7 @@ class UDPPeer:
         self._seq: int = 0
         self.inbox: "queue.Queue[Dict[str, Any]]" = queue.Queue()
 
+        # reliable resend only for SHOT
         self._pending: Dict[int, Dict[str, Any]] = {}  # seq -> {msg, next_send, tries}
         self._received_shots: set[int] = set()
 
@@ -45,7 +46,6 @@ class UDPPeer:
         self._reliable_thread.start()
 
     def stop(self):
-        # ✅ clean stop for ESC exit
         self.running = False
         try:
             self.sock.close()
@@ -85,7 +85,6 @@ class UDPPeer:
             "piece": int(piece_id),
             "angle": float(angle),
             "power": float(power),
-            "t": time.time(),
         }
         self._send(msg)
         self._pending[seq] = {"msg": msg, "next_send": time.time() + 0.08, "tries": 0}
@@ -117,6 +116,32 @@ class UDPPeer:
     def send_snapshot(self, tick: int, state: dict):
         self._send({"type": "STATE_SNAPSHOT", "match_id": self.match_id, "tick": int(tick), "state": state})
 
+    # ---------------- Phase 8 events ----------------
+    def send_goal(self, scorer_team: int, score_blue: int, score_red: int):
+        self._send({
+            "type": "GOAL",
+            "match_id": self.match_id,
+            "scorer": int(scorer_team),
+            "score_blue": int(score_blue),
+            "score_red": int(score_red),
+        })
+
+    def send_reset(self, payload: dict):
+        self._send({
+            "type": "RESET",
+            "match_id": self.match_id,
+            "payload": payload,
+        })
+
+    def send_end(self, winner_team: int, score_blue: int, score_red: int):
+        self._send({
+            "type": "END",
+            "match_id": self.match_id,
+            "winner": int(winner_team),
+            "score_blue": int(score_blue),
+            "score_red": int(score_red),
+        })
+
     # ---------------- HELLO handshake ----------------
     def _start_hello_loop(self):
         if self._hello_thread and self._hello_thread.is_alive():
@@ -144,7 +169,6 @@ class UDPPeer:
         try:
             self.sock.sendto(dumps_line(msg), self.peer_addr)
         except Exception:
-            # socket might be closed during exit
             pass
 
     def _listen_loop(self):
@@ -156,7 +180,6 @@ class UDPPeer:
                 time.sleep(0.005)
                 continue
             except OSError:
-                # socket closed during exit
                 break
             except Exception:
                 time.sleep(0.01)
@@ -198,5 +221,5 @@ class UDPPeer:
             seq = int(msg.get("seq", 0))
             self._pending.pop(seq, None)
 
-        elif t in ("STATE_HASH", "SNAPSHOT_REQ", "STATE_SNAPSHOT"):
+        elif t in ("STATE_HASH", "SNAPSHOT_REQ", "STATE_SNAPSHOT", "GOAL", "RESET", "END"):
             self.inbox.put(msg)

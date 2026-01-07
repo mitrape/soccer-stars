@@ -17,6 +17,10 @@ class WorldCfg:
     piece_r: int = 22
     ball_r: int = 14
 
+    # goals
+    goal_h: int = 180          # mouth height
+    goal_depth: int = 18       # how far "inside" the field edge counts as goal
+
     wall_restitution: float = 0.85
     restitution: float = 0.90
 
@@ -24,12 +28,12 @@ class WorldCfg:
     friction_per_60fps: float = 0.985
 
     # stop condition
-    stop_eps: float = 8.0           # px/sec threshold
-    sleep_frames: int = 8           # consecutive frames below eps to become stopped
+    stop_eps: float = 8.0
+    sleep_frames: int = 8
 
     # input
     max_drag: float = 120.0
-    power_scale: float = 7.0        # speed = power * max_drag * power_scale
+    power_scale: float = 7.0
 
 
 CFG = WorldCfg()
@@ -39,7 +43,7 @@ CFG = WorldCfg()
 @dataclass
 class Disc:
     id: int
-    team: int            # 0 blue, 1 red, 2 ball
+    team: int  # 0 blue, 1 red, 2 ball
     pos: Vec2
     vel: Vec2
     r: float
@@ -55,9 +59,10 @@ class Disc:
 class GameWorld:
     """
     Local physics world.
-    Sync rule: only SHOT input is sent; both sides simulate locally.
+    Sync: only SHOT input is sent, both sides simulate.
 
-    Phase 7: hash/snapshot correction is allowed ONLY when stopped (between turns).
+    Phase 7: hash/snapshot correction only between turns.
+    Phase 8: goal detection + reset helpers (network events handled in GameScreen).
     """
 
     def __init__(self, you_team: int, start_turn_team: int = 0):
@@ -67,25 +72,31 @@ class GameWorld:
         self.discs: List[Disc] = []
         self.ball_id: int = -1
 
-        # aiming state
+        # aiming
         self.aiming: bool = False
         self.selected_id: Optional[int] = None
         self.drag_now: Optional[Vec2] = None
 
-        # robust stop logic
-        # IMPORTANT: Start as already "settled" so first move works immediately.
+        # stop logic
         self._below_eps_frames: int = CFG.sleep_frames
         self._ever_moved: bool = False
 
-        # Phase 7 soft correction targets (positions only)
+        # Phase 7 soft correction targets
         self._corr_targets: Dict[int, Vec2] = {}
         self._corr_active: bool = False
+
+        # goal guard (avoid double-trigger in same entry)
+        self._goal_latched: bool = False
 
         self._spawn()
 
     # ---------------- Layout ----------------
     def field_rect(self) -> pygame.Rect:
         return pygame.Rect(CFG.margin, CFG.margin, WIDTH - 2 * CFG.margin, HEIGHT - 2 * CFG.margin)
+
+    def goal_y_range(self) -> Tuple[float, float]:
+        cy = HEIGHT / 2
+        return cy - CFG.goal_h / 2, cy + CFG.goal_h / 2
 
     def _spawn(self):
         self.discs.clear()
@@ -125,21 +136,20 @@ class GameWorld:
                 return d
         return None
 
-    # ---------------- Turn / input rules ----------------
+    def ball(self) -> Disc:
+        b = self.get(self.ball_id)
+        assert b is not None
+        return b
+
+    # ---------------- Turn / input ----------------
     def is_my_turn(self) -> bool:
         return self.turn_team == self.you_team
 
     def can_shoot_now(self) -> bool:
         return self.is_my_turn() and (not self.any_moving())
 
-    # ---------------- Moving detection (FIXED) ----------------
+    # ---------------- Moving detection ----------------
     def any_moving(self) -> bool:
-        """
-        Robust stopping:
-        - clamp tiny velocities to zero
-        - at the very beginning (before any move), allow immediate play
-        - after a move happened, require sleep_frames stable frames below stop_eps
-        """
         eps2 = CFG.stop_eps * CFG.stop_eps
         any_fast = False
 
@@ -154,9 +164,7 @@ class GameWorld:
             self._below_eps_frames = 0
             return True
 
-        # none are fast now
         if not self._ever_moved:
-            # initial state -> treat as stopped
             self._below_eps_frames = CFG.sleep_frames
             return False
 
@@ -221,18 +229,16 @@ class GameWorld:
     # ---------------- Apply shot ----------------
     def apply_shot(self, piece_id: int, angle: float, power: float) -> bool:
         d = self.get(int(piece_id))
-        if not d:
-            return False
-        if d.team not in (0, 1):
+        if not d or d.team not in (0, 1):
             return False
 
         p = max(0.0, min(1.0, float(power)))
         speed = p * CFG.max_drag * CFG.power_scale
         d.vel = Vec2(speed, 0).rotate_rad(float(angle))
 
-        # motion starts
         self._ever_moved = True
         self._below_eps_frames = 0
+        self._goal_latched = False  # new motion can lead to new goal
         return True
 
     # ---------------- Physics update ----------------
@@ -240,12 +246,10 @@ class GameWorld:
         if dt <= 0:
             return
 
-        # Phase 7 correction only between turns (stopped)
         self._step_soft_correction()
 
         f = self.field_rect()
 
-        # integrate + friction + walls
         for d in self.discs:
             if d.vel.length_squared() > 0:
                 d.pos += d.vel * dt
@@ -332,8 +336,83 @@ class GameWorld:
             self._below_eps_frames = 0
 
     # =========================================================
-    # Phase 7 — Desync protection
+    # Phase 8 — Goals + Reset helpers
     # =========================================================
+
+    def check_goal(self) -> Optional[int]:
+        """
+        Returns scoring team (0=blue, 1=red) if ball is in a goal.
+        Uses a latch to avoid double-triggering.
+        """
+        if self._goal_latched:
+            return None
+
+        b = self.ball()
+        f = self.field_rect()
+        y0, y1 = self.goal_y_range()
+
+        in_goal_y = (y0 <= b.pos.y <= y1)
+
+        # LEFT goal mouth => Red scores (team 1)
+        if in_goal_y and (b.pos.x - b.r) <= (f.left + CFG.goal_depth):
+            self._goal_latched = True
+            return 1
+
+        # RIGHT goal mouth => Blue scores (team 0)
+        if in_goal_y and (b.pos.x + b.r) >= (f.right - CFG.goal_depth):
+            self._goal_latched = True
+            return 0
+
+        return None
+
+    def reset_positions(self, next_turn_team: int = 0):
+        """
+        Hard reset all discs to initial positions, zero velocities.
+        """
+        you = self.you_team
+        self.__init__(you_team=you, start_turn_team=next_turn_team)
+
+    def export_positions(self) -> Dict[str, Any]:
+        """
+        Used for RESET message so both sides reset identically.
+        """
+        discs_sorted = sorted(self.discs, key=lambda d: d.id)
+        return {
+            "turn_team": int(self.turn_team),
+            "discs": [{"id": d.id, "x": float(d.pos.x), "y": float(d.pos.y)} for d in discs_sorted],
+        }
+
+    def import_positions(self, payload: Dict[str, Any]):
+        """
+        Apply RESET positions from peer (hard-set positions, velocities zero).
+        """
+        try:
+            self.turn_team = int(payload.get("turn_team", self.turn_team))
+        except Exception:
+            pass
+
+        id_to_disc = {d.id: d for d in self.discs}
+        for item in payload.get("discs", []):
+            try:
+                did = int(item["id"])
+                x = float(item["x"])
+                y = float(item["y"])
+            except Exception:
+                continue
+            d = id_to_disc.get(did)
+            if d:
+                d.pos = Vec2(x, y)
+                d.vel.update(0, 0)
+
+        # After reset, allow immediate play if it's your turn
+        self._below_eps_frames = CFG.sleep_frames
+        self._ever_moved = False
+        self._goal_latched = False
+
+    # =========================================================
+    # Phase 7 — hash/snapshot (kept)
+    # =========================================================
+
     def state_hash(self) -> str:
         discs_sorted = sorted(self.discs, key=lambda d: d.id)
         parts = [f"{int(round(d.pos.x))},{int(round(d.pos.y))}" for d in discs_sorted]
@@ -354,7 +433,6 @@ class GameWorld:
         return {"discs": discs, "turn_team": int(self.turn_team)}
 
     def apply_snapshot_soft(self, snap: Dict[str, Any], pos_threshold: float = 6.0):
-        # Only correct between turns
         if self.any_moving():
             return
 
@@ -383,7 +461,6 @@ class GameWorld:
             self._corr_targets = targets
             self._corr_active = True
 
-        # sync turn only between turns
         try:
             self.turn_team = int(snap.get("turn_team", self.turn_team))
         except Exception:
@@ -418,8 +495,15 @@ class GameWorld:
         surface.fill((30, 90, 50))
         f = self.field_rect()
         pygame.draw.rect(surface, (235, 235, 235), f, 6, border_radius=14)
+
+        # center line + circle
         pygame.draw.line(surface, (235, 235, 235), (f.centerx, f.top), (f.centerx, f.bottom), 4)
         pygame.draw.circle(surface, (235, 235, 235), (f.centerx, f.centery), 90, 4)
+
+        # goal mouth guides (visual only)
+        y0, y1 = self.goal_y_range()
+        pygame.draw.line(surface, (245, 245, 245), (f.left, int(y0)), (f.left, int(y1)), 6)
+        pygame.draw.line(surface, (245, 245, 245), (f.right, int(y0)), (f.right, int(y1)), 6)
 
         for d in self.discs:
             d.draw(surface)
@@ -427,9 +511,6 @@ class GameWorld:
         if self.aiming and self.selected_id is not None and self.drag_now is not None:
             d = self.get(self.selected_id)
             if d:
-                pygame.draw.line(
-                    surface, (255, 255, 0),
-                    (int(d.pos.x), int(d.pos.y)),
-                    (int(self.drag_now.x), int(self.drag_now.y)),
-                    4
-                )
+                pygame.draw.line(surface, (255, 255, 0),
+                                 (int(d.pos.x), int(d.pos.y)),
+                                 (int(self.drag_now.x), int(self.drag_now.y)), 4)
