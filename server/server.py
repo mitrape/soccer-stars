@@ -11,6 +11,7 @@ online = {}
 status = {}
 user_ip = {}
 udp_port = {}
+pending_invite = {}   # to_user -> from_user
 
 # NEW: invitation sets
 # outgoing[from_user] = set(to_users)
@@ -229,6 +230,7 @@ async def handle_match_end(msg, username):
     Called when a client finishes a match.
     Frees this user and clears any pending invites involving them.
     """
+    global pending_invite
     if not username:
         return
 
